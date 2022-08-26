@@ -2,7 +2,6 @@ import argparse
 import os, sys
 import time
 import tabulate
-
 import torch
 import torch.nn.functional as F
 import torchvision
@@ -176,23 +175,19 @@ def main(args):
         f.write(" ".join(sys.argv))
         f.write("\n")
 
-    # torch.backends.cudnn.benchmark = True
-    # torch.manual_seed(args.seed)
+    torch.backends.cudnn.benchmark = True
+    torch.manual_seed(args.seed)
 
     if use_cuda:
-        pass
-        # torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed(args.seed)
 
     print("Using model %s" % args.model)
-
     print("Loading dataset %s from %s" % (args.dataset, args.data_path))
-    # ratios_class = [0.1, 1]
-    ratios_class = np.logspace(-0.33e1, -0.3, args.num_of_train_points)
-    dic_index = [[0, 8], [8, 16], [16, 24], [24, 32]]
-    index = dic_index[args.part]
-    index = [0, 32]
-    arr = ratios_class[index[0]:index[1]]
-    print(arr)
+    ratios_train_class = np.logspace(-0.33e1, -0.3, args.num_of_train_points)
+    if args.split_index ==-1:
+        arr = ratios_train_class
+    else:
+        arr = np.split(ratios_train_class, 4)[args.split_index]
     for ratio_class in arr:
         print(f'ratio cass: {ratio_class}')
         args.ratio_class = ratio_class
@@ -347,7 +342,7 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        "--part", type=int, default=-1, help="random seed (default: 1)"
+        "--split_index", type=int, default=-1, help="if we want to calculate part of the runs"
     )
     parser.add_argument(
         "--pretrain_weights", type=str, default=None, help="pre train weights "
