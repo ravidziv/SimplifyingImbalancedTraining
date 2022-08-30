@@ -1,34 +1,23 @@
 import argparse
 import os, sys
-import time
-import tabulate
+import pickle
 import torch
-import torch.nn.functional as F
-import torchvision
 import numpy as np
 from datetime import datetime
 from imbalanced import data, models, utils, losses
+import uuid
+import torchvision.datasets as datasets
+from imbalanced.imbalaned_data import IMBALANCECIFAR10, IMBALANCECIFAR100
+from imbalanced.models.model_wrapper import ModelWrapper
+import pytorch_lightning as pl
+import torch.nn.functional as F
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import WandbLogger
 
+import wandb
 
-def crete_table(epoch, train_res, test_res, use_cuda, lr, columns):
-    if use_cuda:
-        memory_usage = torch.cuda.memory_allocated() / (1024.0 ** 3)
-    values = [
-        epoch + 1,
-        lr,
-        train_res["loss"],
-        train_res["accuracy"],
-        test_res["loss"],
-        test_res["accuracy"],
-        memory_usage,
-    ]
-    table = tabulate.tabulate([values], columns, tablefmt="simple", floatfmt="8.4f")
-    if epoch % 40 == 0:
-        table = table.split("\n")
-        table = "\n".join([table[1]] + table)
-    else:
-        table = table.split("\n")[2]
-    return table
+os.environ["WANDB_API_KEY"] = 'edc35c5ed584723f5a3bfb16db545407246b5c98'
+os.environ["WANDB_MODE"] = "online"
 
 
 def update_ens(sgd_ens_preds, n_ensembled, model, test_loader):
@@ -47,114 +36,31 @@ def update_ens(sgd_ens_preds, n_ensembled, model, test_loader):
     return sgd_ens_preds, sgd_targets, n_ensembled
 
 
-def train(args):
-    model_cfg = getattr(models, args.model)
-    loaders, num_classes = data.loaders(
-        args.dataset,
-        args.data_path,
-        args.batch_size,
-        args.num_workers,
-        model_cfg.transform_train,
-        model_cfg.transform_test,
-        use_validation=not args.use_test,
-        split_classes=args.split_classes,
-        ratio_class=args.ratio_class,
-        balanced_sample=args.balanced_sample
-    )
+def test_step(model, epoch, sgd_ens_preds, sgd_targets, n_ensembled, test_loader, criterion, use_cuda, args):
+    model.eval()
+    if (
+            epoch == 0
+            or epoch % args.eval_freq == args.eval_freq - 1
+            or epoch == args.epochs - 1
+    ):
 
-    print("Preparing model")
-    print(*model_cfg.args)
-    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
-    model.to(args.device)
+        test_res = utils.eval(test_loader, model, criterion, cuda=use_cuda)
+    else:
+        test_res = {"loss": None, "accuracy": None}
+    if epoch + 1 > args.start_samples:
+        sgd_ens_preds, sgd_targets, n_ensembled = update_ens(sgd_ens_preds, n_ensembled, model, test_loader)
+    return test_res, sgd_ens_preds, sgd_targets, n_ensembled
 
-    def schedule(epoch):
-        t = (epoch) / (args.swa_start if args.swa else args.epochs)
-        lr_ratio = args.swa_lr / args.lr_init if args.swa else 0.01
-        if t <= 0.5:
-            factor = 1.0
-        elif t <= 0.9:
-            factor = 1.0 - (1.0 - lr_ratio) * (t - 0.5) / 0.4
-        else:
-            factor = lr_ratio
-        return args.lr_init * factor
 
-    # use a slightly modified loss function that allows input of model
-    if args.loss == "CE":
-        criterion = losses.cross_entropy
-        # criterion = F.cross_entropy
-    elif args.loss == "adv_CE":
-        criterion = losses.adversarial_cross_entropy
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=args.lr_init, momentum=args.momentum, weight_decay=args.wd
-    )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=10, epochs=10)
-    start_epoch = 0
-    if args.resume is not None:
-        print("Resume training from %s" % args.resume)
-        checkpoint = torch.load(args.resume)
-        start_epoch = checkpoint["epoch"]
-        model.load_state_dict(checkpoint["state_dict"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
-
-    columns = ["ep", "lr", "tr_loss", "tr_acc", "te_loss", "te_acc", "time", "mem_usage"]
-
+def save_all(epoch, sgd_ens_preds, sgd_targets, model, optimizer, args):
     utils.save_checkpoint(
         args.dir,
-        start_epoch,
-        name=f"det_{args.ratio_class}",
+        epoch + 1,
+        f"det_{args.ratio_class}",
         state_dict=model.state_dict(),
         optimizer=optimizer.state_dict(),
     )
-
-    sgd_ens_preds = None
-    sgd_targets = None
-    n_ensembled = 0.0
-
-    for epoch in range(start_epoch, args.epochs):
-        time_ep = time.time()
-        scheduler.step()
-        lr = scheduler.get_lr()
-        train_res = utils.train_epoch(loaders["train"], model, criterion, optimizer, cuda=use_cuda)
-        if (
-                epoch == 0
-                or epoch % args.eval_freq == args.eval_freq - 1
-                or epoch == args.epochs - 1
-        ):
-            test_res = utils.eval(loaders["test"], model, criterion, cuda=use_cuda)
-        else:
-            test_res = {"loss": None, "accuracy": None}
-
-        if epoch + 1 > args.start_samples:
-            sgd_ens_preds, sgd_targets, n_ensembled = update_ens(sgd_ens_preds, n_ensembled, model, loaders['test'])
-
-        if (epoch + 1) % args.save_freq == 0:
-            utils.save_checkpoint(
-                args.dir,
-                epoch + 1,
-                f"det_{args.ratio_class}",
-                state_dict=model.state_dict(),
-                optimizer=optimizer.state_dict(),
-            )
-            if args.epochs % args.save_freq != 0 and sgd_ens_preds is not None:
-                np.savez(
-                    os.path.join(args.dir, f"{args.ratio_class}_sgd_ens_preds.npz"),
-                    predictions=sgd_ens_preds,
-                    targets=sgd_targets,
-                )
-
-        table = crete_table(epoch, train_res, test_res, use_cuda, lr, columns)
-        print(table)
-
-    if args.epochs % args.save_freq != 0:
-        utils.save_checkpoint(
-            args.dir,
-            args.epochs,
-            name=f"det_{args.ratio_class}",
-            state_dict=model.state_dict(),
-            optimizer=optimizer.state_dict(),
-        )
-    if args.epochs % args.save_freq != 0 and sgd_ens_preds is not None:
+    if sgd_ens_preds is not None:
         np.savez(
             os.path.join(args.dir, f"{args.ratio_class}_sgd_ens_preds.npz"),
             predictions=sgd_ens_preds,
@@ -162,12 +68,150 @@ def train(args):
         )
 
 
+def train_step(scheduler, train_loader, model, criterion, optimizer):
+    lr = scheduler.get_last_lr()
+    train_res = utils.train_epoch(train_loader, model, criterion, optimizer, cuda=use_cuda)
+    scheduler.step()
+    return train_res, lr
+
+
+def load_data(args, model_cfg):
+    if args.dataset == 'CIFAR10':
+        train_dataset = IMBALANCECIFAR10(root=args.data_path, imb_type=args.imb_type, imb_factor=args.imb_factor,
+                                         rand_number=args.seed, train=True, download=True,
+                                         transform=model_cfg.transform_train)
+        val_dataset = datasets.CIFAR10(root=args.data_path, train=False, download=True,
+                                       transform=model_cfg.transform_test)
+        num_classes = 10
+    train_sampler = None
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
+        num_workers=args.num_workers, pin_memory=False, sampler=train_sampler)
+
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=100, shuffle=False,
+        num_workers=args.num_workers, pin_memory=False)
+    return train_loader, val_loader, num_classes
+
+
+def train(args):
+    model_cfg = getattr(models, args.model)
+    train_loader, val_loader, num_classes = load_data(args, model_cfg)
+    cls_num_list = train_loader.dataset.get_cls_num_list()
+    print('cls num list:')
+    print(cls_num_list)
+    args.cls_num_list = cls_num_list
+    print("Preparing model")
+    print(*model_cfg.args)
+    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
+    model = ModelWrapper(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
+                         c_loss=F.cross_entropy, epochs = args.epochs, start_samples = args.start_samples)
+    checkpoint_callback = ModelCheckpoint(monitor="val_acc", mode="max")
+    wandb_logger = WandbLogger(project = 'Imbalanced', name = args.dir, save_dir = args.dir)
+    wandb_logger.experiment.config.update(args)
+
+    trainer = pl.Trainer(
+        # limit_train_batches=10,
+        #log_every_n_steps=10,
+    max_epochs = args.epochs,
+        default_root_dir = args.dir,
+    accelerator='gpu', devices=1,
+    callbacks=[checkpoint_callback],
+    logger=wandb_logger)
+    trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+
+
+def train1(args):
+    wandb.init(project="Imbalanced")
+
+    model_cfg = getattr(models, args.model)
+    train_loader, val_loader, num_classes = load_data(args, model_cfg)
+    # loaders, num_classes = data.loaders(
+    #    args.dataset,
+    #    args.data_path,
+    #    args.batch_size,
+    #    args.num_workers,
+    #    model_cfg.transform_train,
+    #    model_cfg.transform_test,
+    #    imbalanced_type=args.imbalanced_type,
+    #    use_validation=not args.use_test,
+    #    split_classes=args.split_classes,
+    #    ratio_class=args.ratio_class,
+    #    balanced_sample=args.balanced_sample
+    # )
+    cls_num_list = train_loader.dataset.get_cls_num_list()
+    print('cls num list:')
+    print(cls_num_list)
+    args.cls_num_list = cls_num_list
+    print("Preparing model")
+    print(*model_cfg.args)
+    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
+    model.to(args.device)
+    model.train()
+    # use a slightly modified loss function that allows input of model
+    if args.loss == "CE":
+        criterion = losses.cross_entropy
+    elif args.loss == "adv_CE":
+        criterion = losses.adversarial_cross_entropy
+    # optimizer = torch.optim.SGD(
+    #    model.parameters(), lr=args.lr_init, momentum=args.momentum, weight_decay=args.wd
+    # )
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=10, epochs=10)
+
+    model = ModelWrapper(base_model=model)
+
+    start_epoch = 0
+    if args.resume is not None:
+        print("Resume training from %s" % args.resume)
+        checkpoint = torch.load(args.resume)
+        start_epoch = checkpoint["epoch"]
+        model.load_state_dict(checkpoint["state_dict"])
+        # optimizer.load_state_dict(checkpoint["optimizer"])
+
+    columns = ["ep", "lr", "tr_loss", "tr_acc", "te_loss", "te_acc", "time", "mem_usage"]
+
+    # utils.save_checkpoint(
+    #    args.dir,
+    #   start_epoch,
+    #    name=f"det_{args.ratio_class}",
+    #   state_dict=model.state_dict(),
+    #    optimizer=optimizer.state_dict(),
+    # )
+
+    sgd_ens_preds = None
+    sgd_targets = None
+    n_ensembled = 0.0
+    best_acc1 = 0
+    wandb.watch(model)
+
+    for epoch in range(start_epoch, args.epochs):
+        train_res, lr = train_step(scheduler, train_loader, model, criterion, optimizer)
+        test_res, sgd_ens_preds, sgd_targets, n_ensembled = test_step(model, epoch, sgd_ens_preds, sgd_targets,
+                                                                      n_ensembled,
+                                                                      val_loader, criterion, use_cuda, args)
+        acc1 = test_res['accuracy']
+
+        is_best = acc1 > best_acc1
+        best_acc1 = max(acc1, best_acc1)
+        wandb.log({"test/acc": acc1})
+        if (epoch + 1) % args.save_freq == 0:
+            save_all(epoch, sgd_ens_preds, sgd_targets, model, optimizer, args)
+        table = utils.create_table(epoch, train_res, test_res, use_cuda, lr, columns)
+        print(table)
+    save_all(args.epochs, sgd_ens_preds, sgd_targets, model, optimizer, args)
+
+    if args.epochs % args.save_freq != 0:
+        save_all(args.epochs, sgd_ens_preds, sgd_targets, model, optimizer, args)
+
+
 def main(args):
     now = datetime.now()  # current date and time
     date_time = now.strftime("%m_%d_%Y_%H_%M_%S")
 
     args.dir = os.path.join(args.dir,
-                            f'{date_time}_weights_{args.pretrain_weights}_balanced_sample_{args.balanced_sample}')
+                            f'{date_time}_weights_{args.pretrain_weights}_balanced_sample_{args.balanced_sample}_id_{args.id}')
     print("Preparing directory %s" % args.dir)
 
     os.makedirs(args.dir, exist_ok=True)
@@ -175,19 +219,23 @@ def main(args):
         f.write(" ".join(sys.argv))
         f.write("\n")
 
-    torch.backends.cudnn.benchmark = True
-    torch.manual_seed(args.seed)
+    with open(os.path.join(args.dir, "args.pickle"), "wb") as f:
+        pickle.dump(args, f)
+    if args.seed != -1:
+        torch.backends.cudnn.benchmark = True
+        torch.manual_seed(args.seed)
 
-    if use_cuda:
-        torch.cuda.manual_seed(args.seed)
+        if use_cuda:
+            torch.cuda.manual_seed(args.seed)
 
     print("Using model %s" % args.model)
     print("Loading dataset %s from %s" % (args.dataset, args.data_path))
     ratios_train_class = np.logspace(-0.33e1, -0.3, args.num_of_train_points)
-    if args.split_index ==-1:
+    if args.split_index == -1:
         arr = ratios_train_class
     else:
         arr = np.split(ratios_train_class, 4)[args.split_index]
+    arr = ratios_train_class[-1:]
     for ratio_class in arr:
         print(f'ratio cass: {ratio_class}')
         args.ratio_class = ratio_class
@@ -272,7 +320,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "--eval_freq",
         type=int,
-        default=5,
+        default=1,
         metavar="N",
         help="evaluation frequency (default: 5)",
     )
@@ -338,7 +386,7 @@ if __name__ == '__main__':
         "--seed", type=int, default=1, metavar="S", help="random seed (default: 1)"
     )
     parser.add_argument(
-        "--start_samples", type=int, default=150, metavar="S", help="Start epoch for collecting samples"
+        "--start_samples", type=int, default=100, metavar="S", help="Start epoch for collecting samples"
     )
 
     parser.add_argument(
@@ -349,6 +397,8 @@ if __name__ == '__main__':
     )
     parser.add_argument("--no_schedule", action="store_true", help="store schedule")
     parser.add_argument("--balanced_sample", action="store_true", help="Sample each bach ")
+    parser.add_argument("--imb_type", type=str, default='exp', help="type of imbalanced data -binary or exp")
+    parser.add_argument('--imb_factor', default=0.01, type=float, help='imbalance factor')
 
     args = parser.parse_args()
 
@@ -362,4 +412,5 @@ if __name__ == '__main__':
         args.device = torch.device("cpu")
     if args.pretrain_weights == 'imagenet':
         args.pretrain_weights = 'IMAGENET1K_V1'
+    args.id = uuid.uuid4()
     main(args)

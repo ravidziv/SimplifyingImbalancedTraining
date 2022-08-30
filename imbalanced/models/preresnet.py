@@ -5,11 +5,12 @@
 
 import torch.nn as nn
 import torchvision.transforms as transforms
-from torchvision.models import resnet18
+from torchvision.models import resnet18, resnet34
 import math
 import torch
+from functools import partial
 
-__all__ = ["PreResNet110", "PreResNet56", "PreResNet8", "PreResNet83", "PreResNet164", "ResNet18"]
+__all__ = ["PreResNet110", "PreResNet56", "PreResNet8", "PreResNet83", "PreResNet164", "ResNet18", "ResNet34"]
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -179,17 +180,61 @@ class PreResNet164:
     )
 
 
-def get_base(num_classes, weights):
+def get_base(num_classes, weights, size = 18):
     #print (f' num_classes {num_classes}, weights {weights}')
-    model  =resnet18(weights = weights)
+    if size ==18:
+        model  =resnet18(weights = weights)
+    elif size ==34:
+        model = resnet34(weights=weights)
     model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
     torch.nn.init.xavier_uniform_(model.fc.weight)
     return  model
 
+
+class ResNet34:
+    base = partial(get_base,size = 34)
+    args = list()
+    kwargs = {}
+    if False:
+        MEAN_CIFAR = [0.4914672374725342, 0.4822617471218109, 0.4467701315879822]
+        STD_CIFAR = [0.2412, 0.2377, 0.2563]
+        transform_train = transforms.Compose(
+            [
+                #transforms.Resize(32),
+                transforms.RandomCrop(32, padding=4),
+                transforms.RandomHorizontalFlip(0.5),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
+            ]
+        )
+        transform_test = transforms.Compose(
+            [
+                transforms.Resize(32),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
+            ]
+        )
+    else:
+        # Data loading code
+        mean = (0.4914, 0.4822, 0.4465)
+        stdev = (0.2023, 0.1994, 0.2010)
+        transform_test = transforms.Compose([
+            # Resize step is required as we will use a ResNet model, which accepts at leats 224x224 images
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, stdev)
+        ])
+        transform_train = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, stdev)
+        ])
+
+
 class ResNet18:
     base = get_base
     args = list()
-    #kwargs = {"weights": 'IMAGENET1K_V1'}
     kwargs = {}
     MEAN_CIFAR = [0.4914672374725342, 0.4822617471218109, 0.4467701315879822]
     STD_CIFAR = [0.2412, 0.2377, 0.2563]
@@ -209,6 +254,9 @@ class ResNet18:
             transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
         ]
     )
+
+
+
 
 
 
@@ -260,6 +308,8 @@ class PreResNet56:
     base = PreResNet
     args = list()
     kwargs = {"depth": 56}
+
+
     transform_train = transforms.Compose(
         [
             transforms.Resize(32),

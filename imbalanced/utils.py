@@ -6,7 +6,7 @@ from datetime import datetime
 import math
 import numpy as np
 import tqdm
-
+import tabulate
 import torch.nn.functional as F
 
 
@@ -268,3 +268,23 @@ def schedule(epoch, lr_init, epochs, swa, swa_start=None, swa_lr=None):
     else:
         factor = lr_ratio
     return lr_init * factor
+
+def create_table(epoch, train_res, test_res, use_cuda, lr, columns):
+    if use_cuda:
+        memory_usage = torch.cuda.memory_allocated() / (1024.0 ** 3)
+    values = [
+        epoch + 1,
+        lr,
+        train_res["loss"],
+        train_res["accuracy"],
+        test_res["loss"],
+        test_res["accuracy"],
+        memory_usage,
+    ]
+    table = tabulate.tabulate([values], columns, tablefmt="simple", floatfmt="8.4f")
+    if epoch % 40 == 0:
+        table = table.split("\n")
+        table = "\n".join([table[1]] + table)
+    else:
+        table = table.split("\n")[2]
+    return table

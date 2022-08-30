@@ -1,12 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
-  <component name="PublishConfigData" autoUpload="Always" serverName="game3 (6)" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" autoUploadExternalChanges="true">
+  <component name="PublishConfigData" autoUpload="Always" serverName="greence_c" remoteFilesAllowedToDisappearOnAutoupload="false" confirmBeforeUploading="false" autoUploadExternalChanges="true">
     <option name="confirmBeforeUploading" value="false" />
     <serverData>
       <paths name="game3 (6)">
         <serverdata>
           <mappings>
             <mapping deploy="/home/aa-user/ImblancedTraining" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="greence_c">
+        <serverdata>
+          <mappings>
+            <mapping deploy="ImblanedTraining" local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

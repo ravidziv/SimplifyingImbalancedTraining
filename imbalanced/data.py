@@ -5,7 +5,7 @@ import os
 
 from .camvid import CamVid
 
-c10_classes = np.array([[0, 1], [3, 4]], dtype=np.int32)
+c10_classes =[np.array([0, 1]), np.array([0, 1,2,3,4,5,6,7,8,9])]
 
 
 def camvid_loaders(
@@ -112,7 +112,7 @@ def svhn_loaders(
         test_set.labels = test_set.labels[-val_size:]
 
     else:
-        #("You are going to run models on the test set. Are you sure?")
+        # ("You are going to run models on the test set. Are you sure?")
         test_set = torchvision.datasets.SVHN(
             root=path, split="test", download=True, transform=transform_test
         )
@@ -172,6 +172,29 @@ def get_indices(weight, y, max_num=True):
     return samples_indices
 
 
+def get_indices_abs(abs_val, y):
+    #  Return a weighted classes sampler
+    samples_indices = []
+    for i in range(len(abs_val)):
+        current_examples_index = np.array(y) == i
+        num_of_examples = int(abs_val[i])
+        current_examples = np.where(current_examples_index)[0][:num_of_examples]
+        print (i, current_examples.shape, num_of_examples)
+        samples_indices.extend(current_examples)
+    return samples_indices
+
+
+def func(x, adj1, adj2, pw=15):
+    return ((x + adj1) ** pw) * adj2
+
+
+def get_weights_abs(x_max=10, x_min=0, y_max=5000, y_min=100, pw=15):
+    A = np.exp(np.log(y_min / y_max) / pw)
+    a = (x_max - x_min * A) / (A - 1)
+    b = y_min / (x_max + a) ** pw
+    return func(list(range(0, x_max)), a, b)
+
+
 def loaders(
         dataset,
         path,
@@ -181,6 +204,7 @@ def loaders(
         transform_test,
         use_validation=True,
         val_size=5000,
+        imbalanced_type=None,
         split_classes=None,
         shuffle_train=True,
         ratio_class=1,
@@ -198,7 +222,7 @@ def loaders(
             val_size=val_size,
             **kwargs
         )
-    #print('debug:', split_classes)
+    # print('debug:', split_classes)
     path = os.path.join(path, dataset.lower())
 
     ds = getattr(torchvision.datasets, dataset)
@@ -245,7 +269,7 @@ def loaders(
         # delattr(test_set, 'data')
         # delattr(test_set, 'targets')
     else:
-        #print("You are going to run models on the test set. Are you sure?")
+        # print("You are going to run models on the test set. Are you sure?")
         if dataset == "STL10":
             test_set = ds(
                 root=path, split="test", download=True, transform=transform_test
@@ -258,35 +282,42 @@ def loaders(
 
     if split_classes is not None:
         assert dataset == "CIFAR10"
-        assert split_classes in {0, 1}
 
-        #print("Using classes:", end="")
-        #print(c10_classes[split_classes])
-        data_weights = torch.zeros((10,))
-        data_weights[c10_classes[split_classes][0]] = ratio_class
-        data_weights[c10_classes[split_classes][1]] = 1 - ratio_class
-        train_mask = get_indices(data_weights, train_set.targets, max_num=True)
-        # train_mask = np.isin(train_set.targets, c10_classes[split_classes])
+        # print("Using classes:", end="")
+        # print(c10_classes[split_classes])
+        if imbalanced_type == 'binary':
+            data_weights = torch.zeros((10,))
+            data_weights[c10_classes[split_classes][0]] = ratio_class
+            data_weights[c10_classes[split_classes][1]] = 1 - ratio_class
+            train_mask = get_indices(data_weights, train_set.targets, max_num=True)
+            data_weights_test = torch.zeros((10,))
+            data_weights_test[c10_classes[split_classes][0]] = 1
+            data_weights_test[c10_classes[split_classes][1]] = 1
+            num_classes = 2
+
+        else:
+            abs_val = get_weights_abs(x_min=0, x_max=10, y_min=50, y_max=5000, pw=15)
+            train_mask = get_indices_abs(abs_val, train_set.targets)
+            data_weights_test = torch.ones((10,))
+            split_classes
+            num_classes = 10
+        print (len(train_mask))
         train_set.data = train_set.data[train_mask, :]
         train_set.targets = np.array(train_set.targets)[train_mask]
         train_set.targets = np.where(
             train_set.targets[:, None] == c10_classes[split_classes][None, :]
         )[1].tolist()
-        #print(f"Train: {data_weights} %d/%d" % (train_set.data.shape[0], len(train_mask)))
 
-        data_weights_test = torch.zeros((10,))
-        data_weights_test[c10_classes[split_classes][0]] = 1
-        data_weights_test[c10_classes[split_classes][1]] = 1
         test_mask = get_indices(data_weights_test, test_set.targets, max_num=True)
         # test_mask = np.isin(test_set.targets, c10_classes[split_classes])
-        #print(test_set.data.shape, len(test_mask))
+        # print(test_set.data.shape, len(test_mask))
         test_set.data = test_set.data[test_mask, :]
         test_set.targets = np.array(test_set.targets)[test_mask]
         test_set.targets = np.where(
             test_set.targets[:, None] == c10_classes[split_classes][None, :]
         )[1].tolist()
-        #print("Test: %d/%d" % (test_set.data.shape[0], len(test_mask)))
-        num_classes = 2
+        # print("Test: %d/%d" % (test_set.data.shape[0], len(test_mask)))
+
     if balanced_sample:
         y = train_set.targets
         class_sample_count = np.array([len(np.where(y == t)[0]) for t in np.unique(y)])
@@ -297,7 +328,10 @@ def loaders(
                                                          len(samples_weight))
     else:
         sampler = torch.utils.data.RandomSampler(train_set)
-
+    print ('lValsls')
+    for i in range(10):
+        current_examples_index = np.array(train_set.targets) == i
+        print (i, np.sum(current_examples_index))
     return (
         {
             "train": torch.utils.data.DataLoader(
