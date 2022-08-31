@@ -14,43 +14,8 @@ import torch.nn.functional as F
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger
 
-import wandb
-
 os.environ["WANDB_API_KEY"] = 'edc35c5ed584723f5a3bfb16db545407246b5c98'
 os.environ["WANDB_MODE"] = "online"
-
-
-def update_ens(sgd_ens_preds, n_ensembled, model, test_loader):
-    sgd_res = utils.predict(test_loader, model)
-    sgd_preds = sgd_res["predictions"]
-    sgd_targets = sgd_res["targets"]
-    print("updating sgd_ens")
-    if sgd_ens_preds is None:
-        sgd_ens_preds = sgd_preds.copy()
-    else:
-        # TODO: rewrite in a numerically stable way
-        sgd_ens_preds = sgd_ens_preds * n_ensembled / (
-                n_ensembled + 1
-        ) + sgd_preds / (n_ensembled + 1)
-    n_ensembled += 1
-    return sgd_ens_preds, sgd_targets, n_ensembled
-
-
-def test_step(model, epoch, sgd_ens_preds, sgd_targets, n_ensembled, test_loader, criterion, use_cuda, args):
-    model.eval()
-    if (
-            epoch == 0
-            or epoch % args.eval_freq == args.eval_freq - 1
-            or epoch == args.epochs - 1
-    ):
-
-        test_res = utils.eval(test_loader, model, criterion, cuda=use_cuda)
-    else:
-        test_res = {"loss": None, "accuracy": None}
-    if epoch + 1 > args.start_samples:
-        sgd_ens_preds, sgd_targets, n_ensembled = update_ens(sgd_ens_preds, n_ensembled, model, test_loader)
-    return test_res, sgd_ens_preds, sgd_targets, n_ensembled
-
 
 def save_all(epoch, sgd_ens_preds, sgd_targets, model, optimizer, args):
     utils.save_checkpoint(
@@ -68,11 +33,6 @@ def save_all(epoch, sgd_ens_preds, sgd_targets, model, optimizer, args):
         )
 
 
-def train_step(scheduler, train_loader, model, criterion, optimizer):
-    lr = scheduler.get_last_lr()
-    train_res = utils.train_epoch(train_loader, model, criterion, optimizer, cuda=use_cuda)
-    scheduler.step()
-    return train_res, lr
 
 
 def load_data(args, model_cfg):
@@ -122,90 +82,6 @@ def train(args):
     trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
 
 
-def train1(args):
-    wandb.init(project="Imbalanced")
-
-    model_cfg = getattr(models, args.model)
-    train_loader, val_loader, num_classes = load_data(args, model_cfg)
-    # loaders, num_classes = data.loaders(
-    #    args.dataset,
-    #    args.data_path,
-    #    args.batch_size,
-    #    args.num_workers,
-    #    model_cfg.transform_train,
-    #    model_cfg.transform_test,
-    #    imbalanced_type=args.imbalanced_type,
-    #    use_validation=not args.use_test,
-    #    split_classes=args.split_classes,
-    #    ratio_class=args.ratio_class,
-    #    balanced_sample=args.balanced_sample
-    # )
-    cls_num_list = train_loader.dataset.get_cls_num_list()
-    print('cls num list:')
-    print(cls_num_list)
-    args.cls_num_list = cls_num_list
-    print("Preparing model")
-    print(*model_cfg.args)
-    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
-    model.to(args.device)
-    model.train()
-    # use a slightly modified loss function that allows input of model
-    if args.loss == "CE":
-        criterion = losses.cross_entropy
-    elif args.loss == "adv_CE":
-        criterion = losses.adversarial_cross_entropy
-    # optimizer = torch.optim.SGD(
-    #    model.parameters(), lr=args.lr_init, momentum=args.momentum, weight_decay=args.wd
-    # )
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=0.1, steps_per_epoch=10, epochs=10)
-
-    model = ModelWrapper(base_model=model)
-
-    start_epoch = 0
-    if args.resume is not None:
-        print("Resume training from %s" % args.resume)
-        checkpoint = torch.load(args.resume)
-        start_epoch = checkpoint["epoch"]
-        model.load_state_dict(checkpoint["state_dict"])
-        # optimizer.load_state_dict(checkpoint["optimizer"])
-
-    columns = ["ep", "lr", "tr_loss", "tr_acc", "te_loss", "te_acc", "time", "mem_usage"]
-
-    # utils.save_checkpoint(
-    #    args.dir,
-    #   start_epoch,
-    #    name=f"det_{args.ratio_class}",
-    #   state_dict=model.state_dict(),
-    #    optimizer=optimizer.state_dict(),
-    # )
-
-    sgd_ens_preds = None
-    sgd_targets = None
-    n_ensembled = 0.0
-    best_acc1 = 0
-    wandb.watch(model)
-
-    for epoch in range(start_epoch, args.epochs):
-        train_res, lr = train_step(scheduler, train_loader, model, criterion, optimizer)
-        test_res, sgd_ens_preds, sgd_targets, n_ensembled = test_step(model, epoch, sgd_ens_preds, sgd_targets,
-                                                                      n_ensembled,
-                                                                      val_loader, criterion, use_cuda, args)
-        acc1 = test_res['accuracy']
-
-        is_best = acc1 > best_acc1
-        best_acc1 = max(acc1, best_acc1)
-        wandb.log({"test/acc": acc1})
-        if (epoch + 1) % args.save_freq == 0:
-            save_all(epoch, sgd_ens_preds, sgd_targets, model, optimizer, args)
-        table = utils.create_table(epoch, train_res, test_res, use_cuda, lr, columns)
-        print(table)
-    save_all(args.epochs, sgd_ens_preds, sgd_targets, model, optimizer, args)
-
-    if args.epochs % args.save_freq != 0:
-        save_all(args.epochs, sgd_ens_preds, sgd_targets, model, optimizer, args)
-
-
 def main(args):
     now = datetime.now()  # current date and time
     date_time = now.strftime("%m_%d_%Y_%H_%M_%S")
@@ -230,15 +106,20 @@ def main(args):
 
     print("Using model %s" % args.model)
     print("Loading dataset %s from %s" % (args.dataset, args.data_path))
-    ratios_train_class = np.logspace(-0.33e1, -0.3, args.num_of_train_points)
-    if args.split_index == -1:
-        arr = ratios_train_class
+    if args.imb_type =='binary':
+
+        ratios_train_class = np.logspace(-0.33e1, -0.3, args.num_of_train_points)
+        if args.split_index == -1:
+            arr = ratios_train_class
+        else:
+            arr = np.split(ratios_train_class, 4)[args.split_index]
     else:
-        arr = np.split(ratios_train_class, 4)[args.split_index]
-    arr = ratios_train_class[-1:]
+
+        arr = np.logspace(-3,0,args.num_of_train_points)
     for ratio_class in arr:
         print(f'ratio cass: {ratio_class}')
-        args.ratio_class = ratio_class
+        args.imb_factor = ratio_class
+        args.dir = os.path.join(args.dir, str(ratio_class).replace('.', '_'))
         train(args)
 
 
@@ -399,6 +280,8 @@ if __name__ == '__main__':
     parser.add_argument("--balanced_sample", action="store_true", help="Sample each bach ")
     parser.add_argument("--imb_type", type=str, default='exp', help="type of imbalanced data -binary or exp")
     parser.add_argument('--imb_factor', default=0.01, type=float, help='imbalance factor')
+    parser.add_argument('--imb_factor_min', default=0.001, type=float, help='imbalance factor')
+    parser.add_argument('--imb_factor_max', default=1, type=float, help='imbalance factor')
 
     args = parser.parse_args()
 

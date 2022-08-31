@@ -276,7 +276,7 @@ if __name__ == '__main__':
                 checkpoint = torch.load(f)
                 train_loader = get_train_loader(val)
                 if 'det' in filename:
-                    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=None, **model_cfg.kwargs);
+                    model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=None, **model_cfg.kwargs)
                     model.to(device)
                     model.load_state_dict(checkpoint["state_dict"])
                     model.eval()
