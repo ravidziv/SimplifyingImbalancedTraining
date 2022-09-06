@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from torchmetrics.functional import accuracy
 import numpy as np
 import os
+
+
 def update_ens(all_preds, sgd_ens_preds, n_ensembled):
     if sgd_ens_preds is None:
         sgd_ens_preds = all_preds.copy()
@@ -18,7 +20,7 @@ def update_ens(all_preds, sgd_ens_preds, n_ensembled):
 
 class ModelWrapper(pl.LightningModule):
     def __init__(self, base_model, lr=1e-3, momentum=0.9, wd=1e-4, c_loss=F.cross_entropy, epochs=200,
-                 start_samples=150):
+                 start_samples=150, recalibrated=False, calibrated_factor = None):
         super().__init__()
         self.lr = lr
         self.base_model = base_model
@@ -30,6 +32,8 @@ class ModelWrapper(pl.LightningModule):
         self.sgd_ens_preds = None
         self.n_ensembled = 0
         self.save_hyperparameters()
+        self.recalibrated = recalibrated
+        self.calibrated_factor = calibrated_factor
 
     def forward(self, x):
         preds = self.base_model(x)
@@ -66,7 +70,7 @@ class ModelWrapper(pl.LightningModule):
             acc = accuracy(self.sgd_ens_preds, all_labels)
             metrics = {"val_ens_accc": acc, "val_ens_loss": loss}
             self.log_dict(metrics, prog_bar=True, on_step=False, on_epoch=True)
-            dir =self.logger.save_dir
+            dir = self.logger.save_dir
             np.savez(
                 os.path.join(dir, f"sgd_ens_preds.npz"),
                 predictions=self.sgd_ens_preds.cpu(),
@@ -87,6 +91,9 @@ class ModelWrapper(pl.LightningModule):
     def _shared_eval_step(self, batch, batch_idx=None):
         x, y = batch
         y_hat = self(x)
+        if self.recalibrated:
+            y_hat = y_hat *self.calibrated_factor.to('cuda')
+            y_hat = torch.nn.functional.softmax(y_hat, dim=1)
         loss = self.c_loss(y_hat, y)
         acc = accuracy(y_hat, y)
         return loss, acc, y, y_hat
