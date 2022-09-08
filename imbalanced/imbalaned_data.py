@@ -5,30 +5,33 @@ import numpy as np
 
 
 class IMBALANCECIFAR10(torchvision.datasets.CIFAR10):
-    cls_num = 10
 
     def __init__(self, root, imb_type='exp', imb_factor=0.01, rand_number=0, train=True,
                  transform=None, target_transform=None,
                  download=False):
         super(IMBALANCECIFAR10, self).__init__(root, train, transform, target_transform, download)
         np.random.seed(rand_number)
-        self.img_num_list = self.get_img_num_per_cls(self.cls_num, imb_type, imb_factor)
+        self.cls_num = 10
+
+        self.img_num_list = self.get_img_num_per_cls(imb_type, imb_factor)
         self.gen_imbalanced_data(self.img_num_list )
 
-    def get_img_num_per_cls(self, cls_num, imb_type, imb_factor):
-        img_max = len(self.data) / cls_num
+    def get_img_num_per_cls(self, imb_type, imb_factor):
+        img_max = len(self.data) / self.cls_num
+        if imb_type == 'binary_step':
+            self.cls_num = 2
         img_num_per_cls = []
-        if imb_type == 'exp':
-            for cls_idx in range(cls_num):
-                num = img_max * (imb_factor ** (cls_idx / (cls_num - 1.0)))
+        if imb_type == 'exp' or imb_type == 'binary_step':
+            for cls_idx in range(self.cls_num):
+                num = img_max * (imb_factor ** (cls_idx / (self.cls_num - 1.0)))
                 img_num_per_cls.append(int(num))
         elif imb_type == 'step':
-            for cls_idx in range(cls_num // 2):
+            for cls_idx in range(self.cls_num // 2):
                 img_num_per_cls.append(int(img_max))
-            for cls_idx in range(cls_num // 2):
+            for cls_idx in range(self.cls_num // 2):
                 img_num_per_cls.append(int(img_max * imb_factor))
         else:
-            img_num_per_cls.extend([int(img_max)] * cls_num)
+            img_num_per_cls.extend([int(img_max)] * self.cls_num)
         return img_num_per_cls
 
     def gen_imbalanced_data(self, img_num_per_cls):
