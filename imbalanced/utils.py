@@ -8,7 +8,8 @@ import numpy as np
 import tqdm
 import tabulate
 import torch.nn.functional as F
-
+import sys
+import pickle
 
 def flatten(lst):
     tmp = [i.contiguous().view(-1, 1) for i in lst]
@@ -288,3 +289,33 @@ def create_table(epoch, train_res, test_res, use_cuda, lr, columns):
     else:
         table = table.split("\n")[2]
     return table
+
+
+def find_checkpoint(dir):
+    for filename in os.listdir(dir):
+        f = os.path.join(dir, filename)
+        # checking if it is a file
+        print ('1', filename)
+        if os.path.isdir(f):
+            for filename_inner in os.listdir(f):
+                if '.ckpt' in filename_inner :
+                    print('2', filename_inner)
+
+                    full_checkpoint = os.path.join(f, filename_inner)
+                    return full_checkpoint
+
+
+def create_dirs_and_dumps(args):
+    now = datetime.now()  # current date and time
+    date_time = now.strftime("%m_%d_%Y_%H_%M_%S")
+    args.dir = os.path.join(args.dir,
+                            f'{date_time}_weights_{args.pretrain_weights}_balanced_sample_{args.balanced_sample}_id_{args.id}')
+    print("Preparing directory %s" % args.dir)
+
+    os.makedirs(args.dir, exist_ok=True)
+    with open(os.path.join(args.dir, "command.sh"), "w") as f:
+        f.write(" ".join(sys.argv))
+        f.write("\n")
+
+    with open(os.path.join(args.dir, "args.pickle"), "wb") as f:
+        pickle.dump(args, f)

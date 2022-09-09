@@ -20,7 +20,7 @@ def update_ens(all_preds, sgd_ens_preds, n_ensembled):
 
 class ModelWrapper(pl.LightningModule):
     def __init__(self, base_model, lr=1e-3, momentum=0.9, wd=1e-4, c_loss=F.cross_entropy, epochs=200,
-                 start_samples=150, recalibrated=False, calibrated_factor=None):
+                 start_samples=150, recalibrated=False, calibrated_factor=None, args=None):
         super().__init__()
         self.lr = lr
         self.base_model = base_model
@@ -31,9 +31,10 @@ class ModelWrapper(pl.LightningModule):
         self.start_samples = start_samples
         self.sgd_ens_preds = None
         self.n_ensembled = 0
-        self.save_hyperparameters()
+        #self.save_hyperparameters()
         self.recalibrated = recalibrated
         self.calibrated_factor = calibrated_factor
+        self.args=args
 
     def forward(self, x):
         preds = self.base_model(x)
@@ -42,24 +43,24 @@ class ModelWrapper(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
         metrics, y, pred = self._shared_eval_step(batch, batch_idx, name='train')
-        #x, y = batch
-        #preds = self(x)
-        #loss = self.c_loss(preds, y)
-        #acc = accuracy(preds, y)
-        #metrics = {"train_acc": acc, "train_loss": loss}
+        # x, y = batch
+        # preds = self(x)
+        # loss = self.c_loss(preds, y)
+        # acc = accuracy(preds, y)
+        # metrics = {"train_acc": acc, "train_loss": loss}
         self.log_dict(metrics, prog_bar=True, on_step=True, on_epoch=True)
         return metrics['train_loss']
 
     def validation_step(self, batch, batch_idx):
 
-        metrics , y, pred= self._shared_eval_step(batch, batch_idx, name='val')
+        metrics, y, pred = self._shared_eval_step(batch, batch_idx, name='val')
         self.log_dict(metrics, prog_bar=True, on_step=False, on_epoch=True)
         metrics['val_pred'] = pred
         metrics['val_labels'] = y
         return metrics
 
     def validation_epoch_end(self, outs):
-        #print (outs[0]['val_pred'].shape[1])
+        # print (outs[0]['val_pred'].shape[1])
         all_labels = torch.stack([out_i['val_labels'] for out_i in outs]).reshape(-1)
 
         all_preds = torch.stack([out_i['val_pred'] for out_i in outs]).reshape((-1, outs[0]['val_pred'].shape[1]))
@@ -79,14 +80,13 @@ class ModelWrapper(pl.LightningModule):
 
             y_sgd_calibrated = self.sgd_ens_preds * self.calibrated_factor.to('cuda')
             y_sgd_calibrated = torch.nn.functional.softmax(y_sgd_calibrated, dim=1)
-            print('SSSSSS', self.sgd_ens_preds.shape, all_labels.shape)
 
             loss_calibrated = self.c_loss(y_sgd_calibrated, all_labels)
             acc_calibrated = accuracy(y_sgd_calibrated, all_labels)
             loss = self.c_loss(self.sgd_ens_preds, all_labels)
             acc = accuracy(self.sgd_ens_preds, all_labels)
             metrics = {"val_ens_acc": acc, "val_ens_loss": loss, 'val_loss_calibrated': loss_calibrated,
-                       'val_acc_calibrated':acc_calibrated}
+                       'val_acc_calibrated': acc_calibrated}
             for i in range(all_preds.shape[1]):
                 indexes = all_labels == i
                 if torch.sum(indexes) > 0:
@@ -98,8 +98,9 @@ class ModelWrapper(pl.LightningModule):
 
             self.log_dict(metrics, prog_bar=True, on_step=False, on_epoch=True)
 
-    def test_step(self, batch, batch_idx):
-        metrics, y, pred = self._shared_eval_step(batch, batch_idx, name = 'test')
+    def test_step(self, batch, batch_idx, dataloader_idx):
+        metrics, y, pred = self._shared_eval_step(batch, batch_idx, name='test', dataloader_idx=dataloader_idx)
+
         self.log_dict(metrics)
         return metrics
 
@@ -108,31 +109,40 @@ class ModelWrapper(pl.LightningModule):
         y_hat = self.base_model(x)
         return y_hat
 
-    def _shared_eval_step(self, batch, batch_idx=None, name='val'):
+    def _shared_eval_step(self, batch, batch_idx=None, name='val', dataloader_idx=-1):
         x, y = batch
         y_hat = self(x)
-        y_hat_calibrated = y_hat * self.calibrated_factor.to('cuda')
-        y_hat_calibrated = torch.nn.functional.softmax(y_hat_calibrated, dim=1)
         loss = self.c_loss(y_hat, y)
-        loss_calibrated  = self.c_loss(y_hat_calibrated, y)
-        acc = accuracy(y_hat, y, num_classes=y_hat.shape[1])
-        acc_calibrated  = accuracy(y_hat_calibrated, y, num_classes=y_hat.shape[1])
+        acc = accuracy(y_hat, y)
+        metrics_b = {'loss': loss, 'acc': acc}
+        if name == 'test':
+            y_hat_calibrated = y_hat * self.calibrated_factor.to('cuda')
+            y_hat_calibrated = torch.nn.functional.softmax(y_hat_calibrated, dim=1)
+            loss_calibrated = self.c_loss(y_hat_calibrated, y)
+            acc_calibrated = accuracy(y_hat_calibrated, y, num_classes=y_hat.shape[1])
 
-        metrics_b = {'loss': loss, 'acc': acc, 'loss_calibrated': loss_calibrated,
-                     'acc_calibrated': acc_calibrated}
+            metrics_b['loss_calibrated'] = loss_calibrated
+            metrics_b['acc_calibrated'] = acc_calibrated
 
-        for i in range(y_hat.shape[1]):
-            indexes = y ==i
-            if torch.sum(indexes)>0:
-                metrics_b[f'{i}_class_acc'] = accuracy(y_hat[indexes], y[indexes])
-                metrics_b[f'{i}_class_acc_calibrated'] = accuracy(y_hat_calibrated[indexes], y[indexes])
-            else:
-                metrics_b[f'{i}_class_acc'] = 0.
-                metrics_b[f'{i}_class_acc_calibrated'] = 0.
+            for i in range(y_hat.shape[1]):
+                indexes = y == i
+                if torch.sum(indexes) > 0:
+                    metrics_b[f'{i}_class_acc'] = accuracy(y_hat[indexes], y[indexes])
+                    metrics_b[f'{i}_class_acc_calibrated'] = accuracy(y_hat_calibrated[indexes], y[indexes])
+                else:
+                    metrics_b[f'{i}_class_acc'] = 0.
+                    metrics_b[f'{i}_class_acc_calibrated'] = 0.
+
         metrics = {}
         for key in metrics_b.keys():
             metrics[f'{name}_{key}'] = metrics_b[key]
-        return metrics,  y, y_hat
+        if name == 'test':
+            metrics['imb_factor_train'] = self.args.imb_factor
+            metrics['imb_factor_val'] = self.imb_factor_vals[dataloader_idx]
+            #metrics['dir'] = self.args.dir
+            #metrics['pretrain_weights'] = self.args.pretrain_weights
+            #metrics['name'] = self.args.name
+        return metrics, y, y_hat
 
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.wd)

@@ -21,10 +21,16 @@ class IMBALANCECIFAR10(torchvision.datasets.CIFAR10):
         if imb_type == 'binary_step':
             self.cls_num = 2
         img_num_per_cls = []
-        if imb_type == 'exp' or imb_type == 'binary_step':
+        if imb_type == 'exp':
             for cls_idx in range(self.cls_num):
                 num = img_max * (imb_factor ** (cls_idx / (self.cls_num - 1.0)))
                 img_num_per_cls.append(int(num))
+        elif imb_type == 'binary_step':
+            second_num = img_max * (imb_factor ** (1 / (self.cls_num - 1.0)))
+            first_num  = img_max - second_num
+            img_num_per_cls.append(int(first_num))
+            img_num_per_cls.append(int(second_num))
+
         elif imb_type == 'step':
             for cls_idx in range(self.cls_num // 2):
                 img_num_per_cls.append(int(img_max))
