@@ -10,7 +10,7 @@ import tabulate
 import torch.nn.functional as F
 import sys
 import pickle
-
+import random
 def flatten(lst):
     tmp = [i.contiguous().view(-1, 1) for i in lst]
     return torch.cat(tmp).view(-1)
@@ -295,14 +295,19 @@ def find_checkpoint(dir):
     for filename in os.listdir(dir):
         f = os.path.join(dir, filename)
         # checking if it is a file
-        print ('1', filename)
+        #print('1', filename)
         if os.path.isdir(f):
-            for filename_inner in os.listdir(f):
-                if '.ckpt' in filename_inner :
-                    print('2', filename_inner)
+            for filename_i in os.listdir(f):
+                f_i = os.path.join(f, filename_i)
+                # checking if it is a file
+                #print('1', filename_i)
+                if os.path.isdir(f_i):
+                    for filename_inner in os.listdir(f_i):
+                        if '.ckpt' in filename_inner :
+                            #print('2', filename_inner)
 
-                    full_checkpoint = os.path.join(f, filename_inner)
-                    return full_checkpoint
+                            full_checkpoint = os.path.join(f_i, filename_inner)
+                            return full_checkpoint
 
 
 def create_dirs_and_dumps(args):
@@ -319,3 +324,17 @@ def create_dirs_and_dumps(args):
 
     with open(os.path.join(args.dir, "args.pickle"), "wb") as f:
         pickle.dump(args, f)
+
+
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+

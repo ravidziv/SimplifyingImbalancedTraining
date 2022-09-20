@@ -1,42 +1,57 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
+import os
+import random
 import numpy as np
-
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 class IMBALANCECIFAR10(torchvision.datasets.CIFAR10):
 
     def __init__(self, root, imb_type='exp', imb_factor=0.01, rand_number=0, train=True,
                  transform=None, target_transform=None,
-                 download=False):
+                 download=False, imb_factor_second=None):
         super(IMBALANCECIFAR10, self).__init__(root, train, transform, target_transform, download)
         np.random.seed(rand_number)
         self.cls_num = 10
 
-        self.img_num_list = self.get_img_num_per_cls(imb_type, imb_factor)
+        self.img_num_list = self.get_img_num_per_cls(imb_type, imb_factor, imb_factor_second)
         self.gen_imbalanced_data(self.img_num_list )
 
-    def get_img_num_per_cls(self, imb_type, imb_factor):
+    def get_img_num_per_cls(self, imb_type, imb_factor, imb_factor_second=None):
         img_max = len(self.data) / self.cls_num
-        if imb_type == 'binary_step':
+        if imb_type == 'binary_step' or imb_type == 'fixed' or imb_type == 'binary':
             self.cls_num = 2
         img_num_per_cls = []
         if imb_type == 'exp':
             for cls_idx in range(self.cls_num):
                 num = img_max * (imb_factor ** (cls_idx / (self.cls_num - 1.0)))
                 img_num_per_cls.append(int(num))
+        elif imb_type == 'fixed':
+            first_num  =imb_factor
+            second_num =imb_factor_second
+            img_num_per_cls.append(int(img_max*first_num))
+            img_num_per_cls.append(int(img_max*second_num))
         elif imb_type == 'binary_step':
             second_num = img_max * (imb_factor ** (1 / (self.cls_num - 1.0)))
-            first_num  = img_max - second_num
+            first_num = img_max - second_num
             img_num_per_cls.append(int(first_num))
             img_num_per_cls.append(int(second_num))
-
         elif imb_type == 'step':
             for cls_idx in range(self.cls_num // 2):
                 img_num_per_cls.append(int(img_max))
             for cls_idx in range(self.cls_num // 2):
                 img_num_per_cls.append(int(img_max * imb_factor))
         else:
+
             img_num_per_cls.extend([int(img_max)] * self.cls_num)
         return img_num_per_cls
 

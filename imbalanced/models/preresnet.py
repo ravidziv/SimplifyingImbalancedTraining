@@ -5,12 +5,14 @@
 
 import torch.nn as nn
 import torchvision.transforms as transforms
-from torchvision.models import resnet18, resnet34
+from torchvision.models import resnet18, resnet34, resnet50
 import math
 import torch
 from functools import partial
+from self_supervised.SimCLRCIFAR10.models import SimCLR
 
-__all__ = ["PreResNet110", "PreResNet56", "PreResNet8", "PreResNet83", "PreResNet164", "ResNet18", "ResNet34"]
+__all__ = ["PreResNet110", "PreResNet56", "PreResNet8", "PreResNet83", "PreResNet164", "ResNet18", "ResNet34",
+           'ResNet34SSL', 'ResNet50']
 
 
 def conv3x3(in_planes, out_planes, stride=1):
@@ -180,56 +182,76 @@ class PreResNet164:
     )
 
 
-def get_base(num_classes, weights, size = 18):
-    #print (f' num_classes {num_classes}, weights {weights}')
-    if size ==18:
-        model  =resnet18(weights = weights)
-    elif size ==34:
+def get_base(num_classes, weights, size=18):
+    # print (f' num_classes {num_classes}, weights {weights}')
+    if size == 18:
+        model = resnet18(weights=weights)
+    elif size == 34:
         model = resnet34(weights=weights)
-    model.fc = torch.nn.Linear(model.fc.in_features, num_classes)
+    elif size == 'ssl34':
+        base_encoder = resnet34
+        base_model = SimCLR(base_encoder, projection_dim=128)
+        base_model.load_state_dict(torch.load(weights))
+        model = base_model.enc
+
+    elif size == 50:
+        model = resnet50(weights=weights)
+    if size == 'ssl34':
+        in_features = base_model.feature_dim
+    else:
+        in_features = model.fc.in_features
+    model.fc = torch.nn.Linear(in_features, num_classes)
     torch.nn.init.xavier_uniform_(model.fc.weight)
-    return  model
+    return model
+
+
+def get_resnet_transforms(no_use_aug=False, size = 224):
+    mean = (0.4914, 0.4822, 0.4465)
+    stdev = (0.2023, 0.1994, 0.2010)
+    transform_test = transforms.Compose([
+        # Resize step is required as we will use a ResNet model, which accepts at leats 224x224 images
+        transforms.Resize((size, size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean, stdev)
+    ])
+    if no_use_aug:
+        transform_train = transforms.Compose([
+            transforms.Resize((size, size)),
+            # transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, stdev)
+        ])
+    else:
+        transform_train = transforms.Compose([
+            transforms.Resize((size, size)),
+            transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10),
+            # transforms.RandomResizedCrop(224,  scale=(0.5, 1.0)),
+            # transforms.RandomHorizontalFlip(0.5),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, stdev)
+        ])
+    return transform_train, transform_test
 
 
 class ResNet34:
-    base = partial(get_base,size = 34)
+    base = partial(get_base, size=34)
     args = list()
     kwargs = {}
-    if False:
-        MEAN_CIFAR = [0.4914672374725342, 0.4822617471218109, 0.4467701315879822]
-        STD_CIFAR = [0.2412, 0.2377, 0.2563]
-        transform_train = transforms.Compose(
-            [
-                #transforms.Resize(32),
-                transforms.RandomCrop(32, padding=4),
-                transforms.RandomHorizontalFlip(0.5),
-                transforms.ToTensor(),
-                transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
-            ]
-        )
-        transform_test = transforms.Compose(
-            [
-                transforms.Resize(32),
-                transforms.ToTensor(),
-                transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
-            ]
-        )
-    else:
-        # Data loading code
-        mean = (0.4914, 0.4822, 0.4465)
-        stdev = (0.2023, 0.1994, 0.2010)
-        transform_test = transforms.Compose([
-            # Resize step is required as we will use a ResNet model, which accepts at leats 224x224 images
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, stdev)
-        ])
-        transform_train = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.AutoAugment(policy=transforms.AutoAugmentPolicy.CIFAR10),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, stdev)
-        ])
+    get_transforms = get_resnet_transforms
+
+
+class ResNet34SSL:
+    base = partial(get_base, size='ssl34')
+    args = list()
+    kwargs = {}
+    get_transforms = partial(get_resnet_transforms, size = 32)
+
+
+class ResNet50:
+    base = partial(get_base, size=50)
+    args = list()
+    kwargs = {}
+    get_transforms = get_resnet_transforms
 
 
 class ResNet18:
@@ -254,10 +276,6 @@ class ResNet18:
             transforms.Normalize(MEAN_CIFAR, STD_CIFAR),
         ]
     )
-
-
-
-
 
 
 class PreResNet110:
@@ -308,7 +326,6 @@ class PreResNet56:
     base = PreResNet
     args = list()
     kwargs = {"depth": 56}
-
 
     transform_train = transforms.Compose(
         [

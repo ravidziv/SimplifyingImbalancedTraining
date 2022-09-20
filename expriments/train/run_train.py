@@ -2,22 +2,24 @@ import argparse
 import os, sys
 import torch
 import numpy as np
-from imbalanced import models
 import uuid
-from imbalanced.imbalaned_data import IMBALANCECIFAR10, IMBALANCECIFAR100
-from imbalanced.models.model_wrapper import ModelWrapper
+
 import pytorch_lightning as pl
 import torch.nn.functional as F
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import WandbLogger, CSVLogger
 from torch.utils.data import WeightedRandomSampler
-from imbalanced.utils import find_checkpoint, create_dirs_and_dumps
 import wandb
-import pickle
+import logging
+
+logging.getLogger("pytorch_lightning").setLevel(logging.WARNING)
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
+from imbalanced.imbalaned_data import IMBALANCECIFAR10, IMBALANCECIFAR100
+from imbalanced.models.model_wrapper import ModelWrapper, SAMModel
+from imbalanced.utils import find_checkpoint, create_dirs_and_dumps, seed_everything
+from imbalanced import models
 
 os.environ["WANDB_API_KEY"] = 'edc35c5ed584723f5a3bfb16db545407246b5c98'
-os.environ["WANDB_MODE"] = "online"
 
 
 def load_data(args, model_cfg):
@@ -27,12 +29,17 @@ def load_data(args, model_cfg):
     elif args.dataset == 'CIFAR100':
         train_func = IMBALANCECIFAR100
         val_func = IMBALANCECIFAR10
+    else:
+        train_func = None
+        val_func = None
+    transform_train, transform_test = model_cfg.get_transforms(no_use_aug=args.no_use_aug)
     train_dataset = train_func(root=args.data_path, imb_type=args.imb_type, imb_factor=args.imb_factor,
                                rand_number=args.seed, train=True, download=True,
-                               transform=model_cfg.transform_train)
+                               imb_factor_second=args.imb_factor_second,
+                               transform=transform_train)
     val_dataset = val_func(root=args.data_path, train=False, download=True,
                            imb_type=args.imb_type_val, imb_factor=args.imb_factor_val,
-                           transform=model_cfg.transform_test)
+                           transform=transform_test, imb_factor_second=args.imb_factor_val)
     num_classes = train_dataset.cls_num
     train_sampler = None
     targets = train_dataset.targets
@@ -49,66 +56,87 @@ def load_data(args, model_cfg):
         num_workers=args.num_workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=100, shuffle=False,
+        val_dataset, batch_size=200, shuffle=False,
         num_workers=args.num_workers, pin_memory=True, drop_last=True)
     imb_factor = torch.from_numpy(weight / weight[0])
 
     return train_loader, val_loader, num_classes, imb_factor
 
 
-def test(args, arr, csv_logger):
+def load_all_datasets(args, arr):
     """Test on all the different distributions rations"""
-
-    checkpoint_path = find_checkpoint(f'{args.dir}')
-    model = ModelWrapper.load_from_checkpoint(checkpoint_path, args=args)
-    model.imb_factor_vals = arr
-    # model.calibrated_factor = samples_weight
     model_cfg = getattr(models, args.model)
     val_loaders = []
-    for ratio_class_val in arr:
-        print ('Test', ratio_class_val)
-        args.imb_factor_val = ratio_class_val
+    # arr = [arr[-1]]
+    if args.imb_factor_val != -1:
+        arr = [args.imb_factor_val]
+    for i, ratio_class_val in enumerate(arr):
+        # args.imb_factor_val = ratio_class_val
         train_loader, val_loader, num_classes, samples_weight = load_data(args, model_cfg)
+        if i == 0:
+            val_loaders.append(train_loader)
         val_loaders.append(val_loader)
-        #model.args = args
-        #wandb_logger = WandbLogger(project=f'{args.wandb_project}Test', save_dir=f'{args.dir} / {args.imb_factor_val}/')
-        #wandb_logger.experiment.config.update(args)
+    return val_loaders
 
+
+def test(args, arr, csv_logger, val_loaders):
+    """Test on all the different distributions rations"""
+    model_cfg = getattr(models, args.model)
+    model = model_cfg.base(*model_cfg.args, num_classes=2, weights=args.pretrain_weights, **model_cfg.kwargs)
+
+    checkpoint_path = find_checkpoint(f'{args.dir}/{args.wandb_project}')
+    model = ModelWrapper.load_from_checkpoint(checkpoint_path, base_model=model, args=args)
+    model.imb_factor_vals = [-1]
+    model.imb_factor_vals.extend(arr)
+    train_loader, _, num_classes, samples_weight = load_data(args, model_cfg)
+    val_loaders[0] = train_loader
+    model.calibrated_factor = samples_weight
     trainer = pl.Trainer(
+        log_every_n_steps=2,
+
         default_root_dir=args.dir,
         max_epochs=1,
         accelerator='auto', devices=1,
-       logger=csv_logger
-
+        logger=csv_logger,
     )
-    trainer.test(model, dataloaders=val_loaders)
-        #wandb.finish()
+
+    trainer.test(model, dataloaders=val_loaders, verbose=True)
 
 
 def train(args):
     model_cfg = getattr(models, args.model)
+    print('KKKK', args.imb_factor_second, args.imb_factor)
     train_loader, val_loader, num_classes, samples_weight = load_data(args, model_cfg)
     cls_num_list = train_loader.dataset.get_cls_num_list()
     print('cls num list:')
-    print(cls_num_list)
+    print(cls_num_list, val_loader.dataset.get_cls_num_list())
     args.cls_num_list = cls_num_list
     print(*model_cfg.args)
     model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
-    model = ModelWrapper(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
+    if args.use_sam:
+        model = SAMModel(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
                          c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
                          calibrated_factor=samples_weight)
-    checkpoint_callback = ModelCheckpoint(monitor="val_acc", mode="max")
+    else:
+        model = ModelWrapper(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
+                             c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
+                             calibrated_factor=samples_weight)
+    checkpoint_callback = ModelCheckpoint(  # monitor="val_acc", mode="max"
+    )
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", min_delta=0.0000, patience=args.es_patience)
     wandb_logger = None
     if args.use_wandb:
-        wandb_logger = WandbLogger(project=args.wandb_project, name=str(round(args.imb_factor, 3)), save_dir=args.dir)
+        imb_factor = args.imb_factor
+        wandb_logger = WandbLogger(project=args.wandb_project, name=str(round(imb_factor, 3)), save_dir=args.dir,
+                                   offline=False)
         wandb_logger.experiment.config.update(args)
     trainer = pl.Trainer(
-        #log_every_n_steps = 50,
+        log_every_n_steps=39,
+        check_val_every_n_epoch=2,
         default_root_dir=args.dir,
         max_epochs=args.epochs,
         accelerator='gpu', devices=1,
-        callbacks=[checkpoint_callback],
+        callbacks=[checkpoint_callback, early_stopping_callback],
         logger=wandb_logger)
     trainer.fit(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     if args.use_wandb:
@@ -116,26 +144,31 @@ def train(args):
 
 
 def run_model(args):
+    print(args)
     if not args.is_test:
         create_dirs_and_dumps(args)
     if args.seed != -1:
         pl.utilities.seed.seed_everything(seed=args.seed)
-    print("Using model %s" % args.model)
-    print("Loading dataset %s from %s" % (args.dataset, args.data_path))
-    arr = np.logspace(args.imb_factor_min, args.imb_factor_max, args.num_of_points)[:]
+    arr = np.logspace(args.imb_factor_min, args.imb_factor_max, args.num_of_points)
+    if args.imb_type == 'fixed':
+        args.imb_factor_val = 1
+        args.imb_factor_second = args.imb_factor
+        args.imb_factor_val_second = 1
     # Train on different proportions
     original_dir = args.dir
-    csv_logger = CSVLogger(save_dir=f'{args.dir}/test/', name="my_exp_name")
+    csv_logger = CSVLogger(save_dir=f'{args.dir}/test/', name=args.name)
+    print(args.dir, args.name)
     csv_logger.log_hyperparams(args)
-
-    for ratio_class in arr:
+    val_loaders = load_all_datasets(args, arr)
+    for i, ratio_class in enumerate(arr):
         args.imb_factor = ratio_class
         args.dir = os.path.join(original_dir, str(ratio_class).replace('.', '_'))
-        print(f'Ratio class: {ratio_class} {args.dir}')
+        print(f'Ratio class: {i}, {ratio_class} {args.dir}')
         if args.is_test:
-            test(args, arr=arr, csv_logger=csv_logger)
+            test(args, arr=arr, csv_logger=csv_logger, val_loaders=val_loaders)
         else:
             train(args)
+            test(args, arr=arr, csv_logger=csv_logger, val_loaders=val_loaders)
 
 
 if __name__ == '__main__':
@@ -219,7 +252,7 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
-        "--seed", type=int, default=1, metavar="S", help="random seed (default: 1)"
+        "--seed", type=int, default=-1, metavar="S", help="random seed (default: 1)"
     )
     parser.add_argument(
         "--start_samples", type=int, default=100, metavar="S", help="Start epoch for collecting samples"
@@ -239,24 +272,27 @@ if __name__ == '__main__':
     parser.add_argument("--no_schedule", action="store_true", help="store schedule")
     parser.add_argument("--balanced_sample", action="store_true", help="Sample each bach ")
     parser.add_argument(
-        "--num_of_points", type=int, default=32, help="Number of different train runs"
+        "--num_of_points", type=int, default=25, help="Number of different train runs"
     )
     parser.add_argument(
-        "--es_patience", type=int, default=20, help="Number of times till early stopping"
+        "--es_patience", type=int, default=120, help="Number of times till early stopping"
     )
 
-    parser.add_argument("--imb_type", type=str, default='binary_step', help="type of imbalanced data -step (full), "
-                                                                            "exp (full) or  binary_step")
-    parser.add_argument("--imb_type_val", type=str, default='binary_step', help="type of imbalanced val data "
-                                                                                "-step (full), exp (full) or  "
-                                                                                "binary_step")
-    parser.add_argument('--imb_factor', default=-1, type=float, help='imbalance factor')
-    parser.add_argument('--imb_factor_val', default=-1, type=float, help='imbalance factor for val dataset')
-    parser.add_argument('--imb_factor_min', default=-4, type=float, help='imbalance factor min (log scale) -2 ')
-    parser.add_argument('--imb_factor_max', default=-0.3, type=float, help='imbalance factor max (log scale) 0 ')
+    parser.add_argument("--imb_type", type=str, default='fixed', help="type of imbalanced data -step (full), "
+                                                                      "exp (full) or  binary_step")
+    parser.add_argument("--imb_type_val", type=str, default='binary', help="type of imbalanced val data "
+                                                                           "-step (full), exp (full) or  "
+                                                                           "binary_step fixed_minority")
+    parser.add_argument('--load_path', default=None, type=str, help='which path to load')
+    parser.add_argument('--imb_factor', default=0.05, type=float, help='imbalance factor')
+    parser.add_argument('--imb_factor_val', default=2, type=float, help='imbalance factor for val dataset')
+    parser.add_argument('--imb_factor_min', default=-2.5, type=float, help='imbalance factor min (log scale) -2 ')
+    parser.add_argument('--imb_factor_max', default=0.43, type=float, help='imbalance factor max (log scale) 0 ')
     parser.add_argument('--resample', action="store_true", help='resample to over sampling the training')
     parser.add_argument('--is_test', action="store_true", help='train or test')
     parser.add_argument('--use_wandb', action="store_true", help='If we want to log to wandb')
+    parser.add_argument('--no_use_aug', action="store_true", help='If we want not using augmentation')
+    parser.add_argument('--use_sam', action="store_true", help='Use SAM optimizer')
     parser.add_argument("--name", type=str, default='reg', help="name for the run")
 
     args = parser.parse_args()
@@ -269,4 +305,9 @@ if __name__ == '__main__':
     if args.pretrain_weights == 'imagenet':
         args.pretrain_weights = 'IMAGENET1K_V1'
     args.id = uuid.uuid4()
-    run_model(args)
+
+    if args.load_path != None:
+        args.dir = args.load_path
+        run_model(args)
+    else:
+        run_model(args)

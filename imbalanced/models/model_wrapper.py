@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torchmetrics.functional import accuracy
 import numpy as np
 import os
+from imbalanced.sam import SAM
 
 
 def update_ens(all_preds, sgd_ens_preds, n_ensembled):
@@ -31,23 +32,17 @@ class ModelWrapper(pl.LightningModule):
         self.start_samples = start_samples
         self.sgd_ens_preds = None
         self.n_ensembled = 0
-        #self.save_hyperparameters()
+        # self.save_hyperparameters()
         self.recalibrated = recalibrated
         self.calibrated_factor = calibrated_factor
-        self.args=args
+        self.args = args
 
     def forward(self, x):
         preds = self.base_model(x)
         return preds
 
     def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        metrics, y, pred = self._shared_eval_step(batch, batch_idx, name='train')
-        # x, y = batch
-        # preds = self(x)
-        # loss = self.c_loss(preds, y)
-        # acc = accuracy(preds, y)
-        # metrics = {"train_acc": acc, "train_loss": loss}
+        metrics, y, pred = self.shared_step(batch, name= 'train')
         self.log_dict(metrics, prog_bar=True, on_step=True, on_epoch=True)
         return metrics['train_loss']
 
@@ -70,12 +65,13 @@ class ModelWrapper(pl.LightningModule):
                 self.sgd_ens_preds = all_preds
             self.sgd_ens_preds, self.n_ensembled = update_ens(
                 all_preds=all_preds, sgd_ens_preds=self.sgd_ens_preds, n_ensembled=self.n_ensembled)
-            dir = self.logger.save_dir
-            np.savez(
-                os.path.join(dir, f"sgd_ens_preds.npz"),
-                predictions=self.sgd_ens_preds.cpu(),
-                targets=all_labels.cpu(),
-            )
+            if self.logger is not None:
+                dir = self.logger.save_dir
+                np.savez(
+                    os.path.join(dir, f"sgd_ens_preds.npz"),
+                    predictions=self.sgd_ens_preds.cpu(),
+                    targets=all_labels.cpu(),
+                )
         if self.sgd_ens_preds is not None:
 
             y_sgd_calibrated = self.sgd_ens_preds * self.calibrated_factor.to('cuda')
@@ -85,16 +81,19 @@ class ModelWrapper(pl.LightningModule):
             acc_calibrated = accuracy(y_sgd_calibrated, all_labels)
             loss = self.c_loss(self.sgd_ens_preds, all_labels)
             acc = accuracy(self.sgd_ens_preds, all_labels)
-            metrics = {"val_ens_acc": acc, "val_ens_loss": loss, 'val_loss_calibrated': loss_calibrated,
-                       'val_acc_calibrated': acc_calibrated}
+            metrics = {"val_ens_acc": acc, "val_ens_loss": loss,
+                       #'val_loss_calibrated': loss_calibrated,
+                       #'val_acc_calibrated': acc_calibrated
+    }
             for i in range(all_preds.shape[1]):
                 indexes = all_labels == i
                 if torch.sum(indexes) > 0:
                     metrics[f'{i}_class_acc'] = accuracy(self.sgd_ens_preds[indexes], all_labels[indexes])
-                    metrics[f'{i}_class_acc_calibrated'] = accuracy(y_sgd_calibrated[indexes], all_labels[indexes])
-                else:
-                    metrics[f'{i}_class_acc'] = 0.
-                    metrics[f'{i}_class_acc_calibrated'] = 0.
+                    metrics[f'{i}_class_loss'] = self.c_loss(self.sgd_ens_preds[indexes], all_labels[indexes])
+                    #metrics[f'{i}_class_acc_calibrated'] = accuracy(y_sgd_calibrated[indexes], all_labels[indexes])
+                # else:
+                #    metrics[f'{i}_class_acc'] = 0.
+                #    metrics[f'{i}_class_acc_calibrated'] = 0.
 
             self.log_dict(metrics, prog_bar=True, on_step=False, on_epoch=True)
 
@@ -109,42 +108,78 @@ class ModelWrapper(pl.LightningModule):
         y_hat = self.base_model(x)
         return y_hat
 
-    def _shared_eval_step(self, batch, batch_idx=None, name='val', dataloader_idx=-1):
+
+    def shared_step(self, batch, name):
         x, y = batch
         y_hat = self(x)
         loss = self.c_loss(y_hat, y)
         acc = accuracy(y_hat, y)
-        metrics_b = {'loss': loss, 'acc': acc}
-        if name == 'test':
+        metrics_b = {f'{name}_loss': loss, f'{name}_acc': acc}
+        return metrics_b, y, y_hat
+
+    def _shared_eval_step(self, batch, batch_idx=None, name='val', dataloader_idx=-1):
+        metrics_b, y, y_hat = self.shared_step(batch, name)
+        if name == 'test' or name == 'val':
             y_hat_calibrated = y_hat * self.calibrated_factor.to('cuda')
             y_hat_calibrated = torch.nn.functional.softmax(y_hat_calibrated, dim=1)
             loss_calibrated = self.c_loss(y_hat_calibrated, y)
             acc_calibrated = accuracy(y_hat_calibrated, y, num_classes=y_hat.shape[1])
-
-            metrics_b['loss_calibrated'] = loss_calibrated
-            metrics_b['acc_calibrated'] = acc_calibrated
-
+            metrics_b[f'{name}_loss_calibrated'] = loss_calibrated
+            metrics_b[f'{name}_acc_calibrated'] = acc_calibrated
             for i in range(y_hat.shape[1]):
                 indexes = y == i
+                #print (i, torch.sum(indexes), torch.max(y), torch.min(y))
                 if torch.sum(indexes) > 0:
-                    metrics_b[f'{i}_class_acc'] = accuracy(y_hat[indexes], y[indexes])
-                    metrics_b[f'{i}_class_acc_calibrated'] = accuracy(y_hat_calibrated[indexes], y[indexes])
-                else:
-                    metrics_b[f'{i}_class_acc'] = 0.
-                    metrics_b[f'{i}_class_acc_calibrated'] = 0.
-
-        metrics = {}
-        for key in metrics_b.keys():
-            metrics[f'{name}_{key}'] = metrics_b[key]
+                    acc_o = accuracy(y_hat[indexes], y[indexes])
+                    loss_o = self.c_loss(y_hat[indexes], y[indexes])
+                    metrics_b[f'{name}_{i}_class_acc'] = acc_o
+                    metrics_b[f'{name}_{i}_class_loss'] = loss_o
         if name == 'test':
-            metrics['imb_factor_train'] = self.args.imb_factor
-            metrics['imb_factor_val'] = self.imb_factor_vals[dataloader_idx]
-            #metrics['dir'] = self.args.dir
-            #metrics['pretrain_weights'] = self.args.pretrain_weights
-            #metrics['name'] = self.args.name
-        return metrics, y, y_hat
+            metrics_b['imb_factor_train'] = self.args.imb_factor
+            metrics_b['imb_factor_val'] = self.imb_factor_vals[dataloader_idx]
+        return metrics_b, y, y_hat
 
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.wd)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
+        return [optimizer], [scheduler]
+
+
+class SAMModel(ModelWrapper):
+    def __init__(self,  **kwargs):
+        super().__init__(**kwargs)
+        self.automatic_optimization = False
+
+    def training_step(self, batch, batch_idx):
+        metrics = {}
+        def closure():
+            metrics, y_hat, y, = self.shared_step(batch, 'train')
+            loss = metrics['train_loss']
+            self.manual_backward(loss)
+            return loss
+
+        optimizer = self.optimizers()
+        #optimizer.first_step(zero_grad=True)
+
+        # first forward-backward pass
+        #metrics, y_hat, y,  = self.shared_step(batch, 'train')
+        #loss_1 = metrics['train_loss']
+        #self.manual_backward(loss_1, optimizer)
+        #optimizer.first_step(zero_grad=True)
+
+        # second forward-backward pass
+        metrics, y, y_hat = self.shared_step(batch, 'train')
+        loss_2 =  metrics['train_loss']
+        self.manual_backward(loss_2)
+        optimizer.step(closure)
+        optimizer.zero_grad()
+
+        self.log_dict(metrics, prog_bar=True, on_step=True, on_epoch=True)
+        return  metrics['train_loss']
+
+    def configure_optimizers(self):
+        base_optimizer = torch.optim.SGD
+        #optimizer = SAM(self.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.wd)
+        optimizer = SAM(self.parameters(), base_optimizer, lr=self.lr, momentum=self.momentum, weight_decay=self.wd)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.epochs)
         return [optimizer], [scheduler]
