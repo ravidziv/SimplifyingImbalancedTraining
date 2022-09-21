@@ -58,9 +58,9 @@ def load_data(args, model_cfg):
     val_loader = torch.utils.data.DataLoader(
         val_dataset, batch_size=200, shuffle=False,
         num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    imb_factor = torch.from_numpy(weight / weight[0])
+    weights = torch.from_numpy(weight / np.min(weight))
 
-    return train_loader, val_loader, num_classes, imb_factor
+    return train_loader, val_loader, num_classes, samples_weight ,weights
 
 
 def load_all_datasets(args, arr):
@@ -71,7 +71,7 @@ def load_all_datasets(args, arr):
     if args.imb_factor_val != -1:
         arr = [args.imb_factor_val]
     for i, ratio_class_val in enumerate(arr):
-        # args.imb_factor_val = ratio_class_val
+        args.imb_factor_val = ratio_class_val
         train_loader, val_loader, num_classes, samples_weight = load_data(args, model_cfg)
         if i == 0:
             val_loaders.append(train_loader)
@@ -88,7 +88,7 @@ def test(args, arr, csv_logger, val_loaders):
     model = ModelWrapper.load_from_checkpoint(checkpoint_path, base_model=model, args=args)
     model.imb_factor_vals = [-1]
     model.imb_factor_vals.extend(arr)
-    train_loader, _, num_classes, samples_weight = load_data(args, model_cfg)
+    train_loader, _, num_classes, samples_weight, weights = load_data(args, model_cfg)
     val_loaders[0] = train_loader
     model.calibrated_factor = samples_weight
     trainer = pl.Trainer(
@@ -105,8 +105,7 @@ def test(args, arr, csv_logger, val_loaders):
 
 def train(args):
     model_cfg = getattr(models, args.model)
-    print('KKKK', args.imb_factor_second, args.imb_factor)
-    train_loader, val_loader, num_classes, samples_weight = load_data(args, model_cfg)
+    train_loader, val_loader, num_classes, samples_weight, weights = load_data(args, model_cfg)
     cls_num_list = train_loader.dataset.get_cls_num_list()
     print('cls num list:')
     print(cls_num_list, val_loader.dataset.get_cls_num_list())
@@ -116,7 +115,7 @@ def train(args):
     if args.use_sam:
         model = SAMModel(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
                          c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
-                         calibrated_factor=samples_weight)
+                         calibrated_factor=samples_weight, weights_labels=weights)
     else:
         model = ModelWrapper(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
                              c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
@@ -150,9 +149,9 @@ def run_model(args):
     if args.seed != -1:
         pl.utilities.seed.seed_everything(seed=args.seed)
     arr = np.logspace(args.imb_factor_min, args.imb_factor_max, args.num_of_points)
+    args.imb_factor_second = args.imb_factor
     if args.imb_type == 'fixed':
         args.imb_factor_val = 1
-        args.imb_factor_second = args.imb_factor
         args.imb_factor_val_second = 1
     # Train on different proportions
     original_dir = args.dir

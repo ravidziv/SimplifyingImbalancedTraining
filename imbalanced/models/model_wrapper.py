@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torchmetrics.functional import accuracy
 import numpy as np
 import os
-from imbalanced.sam import SAM
+from imbalanced.optimizers.sam import SAM
 
 
 def update_ens(all_preds, sgd_ens_preds, n_ensembled):
@@ -109,10 +109,11 @@ class ModelWrapper(pl.LightningModule):
         return y_hat
 
 
-    def shared_step(self, batch, name):
+    def shared_step(self, batch, name, weights = None):
         x, y = batch
         y_hat = self(x)
-        loss = self.c_loss(y_hat, y)
+
+        loss = self.c_loss(y_hat, y, weights)
         acc = accuracy(y_hat, y)
         metrics_b = {f'{name}_loss': loss, f'{name}_acc': acc}
         return metrics_b, y, y_hat
@@ -136,6 +137,7 @@ class ModelWrapper(pl.LightningModule):
                     metrics_b[f'{name}_{i}_class_loss'] = loss_o
         if name == 'test':
             metrics_b['imb_factor_train'] = self.args.imb_factor
+            metrics_b['imb_factor_train_second'] = self.args.imb_factor_second
             metrics_b['imb_factor_val'] = self.imb_factor_vals[dataloader_idx]
         return metrics_b, y, y_hat
 
@@ -149,26 +151,20 @@ class SAMModel(ModelWrapper):
     def __init__(self,  **kwargs):
         super().__init__(**kwargs)
         self.automatic_optimization = False
+        self.weights_labels = kwargs['weights_labels']
 
     def training_step(self, batch, batch_idx):
         metrics = {}
         def closure():
-            metrics, y_hat, y, = self.shared_step(batch, 'train')
+            metrics, y_hat, y, = self.shared_step(batch, name = 'train')
             loss = metrics['train_loss']
             self.manual_backward(loss)
             return loss
-
         optimizer = self.optimizers()
-        #optimizer.first_step(zero_grad=True)
-
-        # first forward-backward pass
-        #metrics, y_hat, y,  = self.shared_step(batch, 'train')
-        #loss_1 = metrics['train_loss']
-        #self.manual_backward(loss_1, optimizer)
-        #optimizer.first_step(zero_grad=True)
-
         # second forward-backward pass
-        metrics, y, y_hat = self.shared_step(batch, 'train')
+        x, y = batch
+        weights = self.weights_labels
+        metrics, y, y_hat = self.shared_step(batch, weights=weights , name='train')
         loss_2 =  metrics['train_loss']
         self.manual_backward(loss_2)
         optimizer.step(closure)
