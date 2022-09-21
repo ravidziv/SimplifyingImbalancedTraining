@@ -85,11 +85,12 @@ def test(args, arr, csv_logger, val_loaders):
 
     checkpoint_path = find_checkpoint(f'{args.dir}/{args.wandb_project}')
     model = ModelWrapper.load_from_checkpoint(checkpoint_path, base_model=model, args=args)
+    model = ModelWrapper.load_from_checkpoint(checkpoint_path, base_model=model, args=args)
     model.imb_factor_vals = [-1]
     model.imb_factor_vals.extend(arr)
     train_loader, _, num_classes, samples_weight, weights = load_data(args, model_cfg)
     val_loaders[0] = train_loader
-    model.calibrated_factor = samples_weight
+    model.calibrated_factor = weights
     trainer = pl.Trainer(
         log_every_n_steps=2,
 
