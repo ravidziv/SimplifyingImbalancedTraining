@@ -9,7 +9,7 @@ from torchvision.models import resnet18, resnet34, resnet50
 import math
 import torch
 from functools import partial
-from self_supervised.SimCLR.models import SimCLR
+#from self_supervised.SimCLR.models import SimCLR
 
 __all__ = ["PreResNet110", "PreResNet56", "PreResNet8", "PreResNet83", "PreResNet164", "ResNet18", "ResNet34",
            'ResNet34SSL', 'ResNet50']

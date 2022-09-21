@@ -55,7 +55,6 @@ class ModelWrapper(pl.LightningModule):
         return metrics
 
     def validation_epoch_end(self, outs):
-        # print (outs[0]['val_pred'].shape[1])
         all_labels = torch.stack([out_i['val_labels'] for out_i in outs]).reshape(-1)
 
         all_preds = torch.stack([out_i['val_pred'] for out_i in outs]).reshape((-1, outs[0]['val_pred'].shape[1]))
@@ -129,7 +128,6 @@ class ModelWrapper(pl.LightningModule):
             metrics_b[f'{name}_acc_calibrated'] = acc_calibrated
             for i in range(y_hat.shape[1]):
                 indexes = y == i
-                #print (i, torch.sum(indexes), torch.max(y), torch.min(y))
                 if torch.sum(indexes) > 0:
                     acc_o = accuracy(y_hat[indexes], y[indexes])
                     loss_o = self.c_loss(y_hat[indexes], y[indexes])

@@ -45,10 +45,9 @@ def load_data(args, model_cfg):
     targets = train_dataset.targets
     class_count = np.unique(targets, return_counts=True)[1]
     weight = 1. / class_count
-
+    samples_weight = weight[targets]
+    samples_weight = torch.from_numpy(samples_weight)
     if args.resample:
-        samples_weight = weight[targets]
-        samples_weight = torch.from_numpy(samples_weight)
         train_sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
 
     train_loader = torch.utils.data.DataLoader(
@@ -72,7 +71,7 @@ def load_all_datasets(args, arr):
         arr = [args.imb_factor_val]
     for i, ratio_class_val in enumerate(arr):
         args.imb_factor_val = ratio_class_val
-        train_loader, val_loader, num_classes, samples_weight = load_data(args, model_cfg)
+        train_loader, val_loader, num_classes, samples_weight, weights = load_data(args, model_cfg)
         if i == 0:
             val_loaders.append(train_loader)
         val_loaders.append(val_loader)
@@ -112,14 +111,15 @@ def train(args):
     args.cls_num_list = cls_num_list
     print(*model_cfg.args)
     model = model_cfg.base(*model_cfg.args, num_classes=num_classes, weights=args.pretrain_weights, **model_cfg.kwargs)
+
     if args.use_sam:
         model = SAMModel(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
                          c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
-                         calibrated_factor=samples_weight, weights_labels=weights)
+                         calibrated_factor=weights, weights_labels=weights)
     else:
         model = ModelWrapper(base_model=model, lr=args.lr_init, momentum=args.momentum, wd=args.wd,
                              c_loss=F.cross_entropy, epochs=args.epochs, start_samples=args.start_samples,
-                             calibrated_factor=samples_weight)
+                             calibrated_factor=weights)
     checkpoint_callback = ModelCheckpoint(  # monitor="val_acc", mode="max"
     )
     early_stopping_callback = EarlyStopping(monitor="val_loss", mode="min", min_delta=0.0000, patience=args.es_patience)
