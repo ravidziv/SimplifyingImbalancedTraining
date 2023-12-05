@@ -19,7 +19,6 @@ from imbalanced.models.model_wrapper import ModelWrapper, SAMModel
 from imbalanced.utils import find_checkpoint, create_dirs_and_dumps, seed_everything
 from imbalanced import models
 
-os.environ["WANDB_API_KEY"] = 'edc35c5ed584723f5a3bfb16db545407246b5c98'
 
 
 def load_data(args, model_cfg):
