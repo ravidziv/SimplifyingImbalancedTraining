@@ -44,5 +44,3 @@ python [experiment_script.py] --options
 ##  Authors and Acknowledgments
 This project is based on the work of Ravid Shwartz-Ziv, Micah Goldblum, Yucen Lily Li, C. Bayan Bruss, and Andrew Gordon Wilson. We extend our gratitude to New York University and Capital One for their support.
 
-## License
-This project is licensed under [LICENSE]. See the LICENSE file for more details.
